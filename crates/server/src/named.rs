@@ -67,7 +67,7 @@ use trust_dns::serialize::txt::{Lexer, Parser};
     not(feature = "dns-over-rustls")
 ))]
 use trust_dns_openssl::tls_server::*;
-use trust_dns_server::authority::{Authority, Catalog, Journal, ZoneType};
+use trust_dns_server::authority::{Authority, Catalog, ZoneType};
 #[cfg(feature = "dnssec")]
 use trust_dns_server::config::KeyConfig;
 #[cfg(feature = "dns-over-tls")]
@@ -75,6 +75,7 @@ use trust_dns_server::config::TlsCertConfig;
 use trust_dns_server::config::{Config, ZoneConfig};
 use trust_dns_server::logger;
 use trust_dns_server::server::ServerFuture;
+use trust_dns_server::store::sqlite::Journal;
 
 fn parse_zone_file(
     file: File,

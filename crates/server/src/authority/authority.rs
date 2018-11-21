@@ -21,7 +21,8 @@ use trust_dns::rr::{DNSClass, LowerName, Name, RData, Record, RecordSet, RecordT
 
 #[cfg(feature = "dnssec")]
 use authority::UpdateRequest;
-use authority::{AuthLookup, Journal, MessageRequest, UpdateResult, ZoneType};
+use authority::{AuthLookup, MessageRequest, UpdateResult, ZoneType};
+use store::sqlite::Journal;
 
 use error::{PersistenceErrorKind, PersistenceResult};
 
