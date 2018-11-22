@@ -10,6 +10,7 @@ use trust_dns::rr::dnssec::*;
 use trust_dns::rr::*;
 use trust_dns::serialize::txt::*;
 use trust_dns_server::authority::*;
+use trust_dns_server::store::sqlite::Authority;
 
 #[test]
 fn test_string() {

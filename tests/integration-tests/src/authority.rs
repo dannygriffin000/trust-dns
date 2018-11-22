@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use trust_dns::rr::*;
 
-use trust_dns_server::authority::Authority;
 use trust_dns_server::authority::ZoneType;
+use trust_dns_server::store::sqlite::Authority;
 
 #[allow(unused)]
 pub fn create_example() -> Authority {

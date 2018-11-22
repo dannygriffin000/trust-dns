@@ -26,10 +26,8 @@ use trust_dns::rr::dnssec::{Algorithm, SupportedAlgorithms};
 use trust_dns::rr::rdata::opt::{EdnsCode, EdnsOption};
 use trust_dns::rr::{LowerName, RecordType};
 
-use authority::{
-    AuthLookup, Authority, LookupRecords, MessageRequest, MessageResponse, MessageResponseBuilder,
-    ZoneType,
-};
+use authority::{AuthLookup, MessageRequest, MessageResponse, MessageResponseBuilder, ZoneType};
+use store::sqlite::{Authority, LookupRecords};
 
 /// Set of authorities, zones, available to this server.
 #[derive(Default)]

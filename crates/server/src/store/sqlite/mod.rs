@@ -7,6 +7,8 @@
 
 //! SQLite serving with Dynamic DNS and journaling support
 
+pub mod authority;
 pub mod persistence;
 
+pub use self::authority::{Authority, LookupRecords};
 pub use self::persistence::Journal;

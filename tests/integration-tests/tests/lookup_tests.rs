@@ -20,7 +20,8 @@ use trust_dns_resolver::lookup::{Lookup, LookupFuture};
 use trust_dns_resolver::lookup_ip::LookupIpFuture;
 use trust_dns_resolver::lookup_state::CachingClient;
 use trust_dns_resolver::Hosts;
-use trust_dns_server::authority::{Authority, Catalog};
+use trust_dns_server::authority::Catalog;
+use trust_dns_server::store::sqlite::Authority;
 
 use trust_dns_integration::authority::create_example;
 use trust_dns_integration::mock_client::*;
@@ -81,7 +82,7 @@ fn test_lookup_hosts() {
         RecordType::A,
         Lookup::new_with_max_ttl(
             Query::query(Name::from_str("www.example.com.").unwrap(), RecordType::A),
-            Arc::new(vec![RData::A(Ipv4Addr::new(10, 0, 1, 104))])
+            Arc::new(vec![RData::A(Ipv4Addr::new(10, 0, 1, 104))]),
         ),
     );
 

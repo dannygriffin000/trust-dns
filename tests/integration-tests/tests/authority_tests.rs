@@ -15,6 +15,7 @@ use trust_dns::rr::rdata::*;
 use trust_dns::rr::*;
 
 use trust_dns_server::authority::*;
+use trust_dns_server::store::sqlite::{Authority, Journal};
 
 use trust_dns_integration::authority::create_example;
 #[cfg(feature = "dnssec")]
