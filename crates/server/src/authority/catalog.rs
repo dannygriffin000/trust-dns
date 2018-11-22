@@ -26,13 +26,15 @@ use trust_dns::rr::dnssec::{Algorithm, SupportedAlgorithms};
 use trust_dns::rr::rdata::opt::{EdnsCode, EdnsOption};
 use trust_dns::rr::{LowerName, RecordType};
 
-use authority::{AuthLookup, MessageRequest, MessageResponse, MessageResponseBuilder, ZoneType};
-use store::sqlite::{LookupRecords, SqliteAuthority as Authority};
+use authority::{
+    AuthLookup, Authority, MessageRequest, MessageResponse, MessageResponseBuilder, ZoneType,
+};
+use store::sqlite::LookupRecords;
 
 /// Set of authorities, zones, available to this server.
 #[derive(Default)]
 pub struct Catalog {
-    authorities: HashMap<LowerName, RwLock<Authority>>,
+    authorities: HashMap<LowerName, RwLock<Box<dyn Authority>>>,
 }
 
 fn send_response<R: ResponseHandler + 'static>(
@@ -158,12 +160,12 @@ impl Catalog {
     ///
     /// * `name` - zone name, e.g. example.com.
     /// * `authority` - the zone data
-    pub fn upsert(&mut self, name: LowerName, authority: Authority) {
+    pub fn upsert(&mut self, name: LowerName, authority: Box<dyn Authority>) {
         self.authorities.insert(name, RwLock::new(authority));
     }
 
     /// Remove a zone from the catalog
-    pub fn remove(&mut self, name: &LowerName) -> Option<RwLock<Authority>> {
+    pub fn remove(&mut self, name: &LowerName) -> Option<RwLock<Box<dyn Authority>>> {
         self.authorities.remove(name)
     }
 
@@ -441,7 +443,7 @@ impl Catalog {
     }
 
     /// Recursively searches the catalog for a matching authority
-    pub fn find(&self, name: &LowerName) -> Option<&RwLock<Authority>> {
+    pub fn find(&self, name: &LowerName) -> Option<&RwLock<Box<dyn Authority>>> {
         self.authorities.get(name).or_else(|| {
             let name = name.base_name();
             if !name.is_root() {

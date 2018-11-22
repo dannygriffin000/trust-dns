@@ -504,7 +504,7 @@ pub fn main() {
             .unwrap_or_else(|_| panic!("bad zone name in {:?}", config_path));
 
         match load_zone(zone_dir, zone) {
-            Ok(authority) => catalog.upsert(zone_name.into(), authority),
+            Ok(authority) => catalog.upsert(zone_name.into(), Box::new(authority)),
             Err(error) => error!("could not load zone {}: {}", zone_name, error),
         }
     }

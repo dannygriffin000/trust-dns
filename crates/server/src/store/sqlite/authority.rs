@@ -1,4 +1,4 @@
-// Copyright 2015-2017 Benjamin Fry <benjaminfry@me.com>
+// Copyright 2015-2018 Benjamin Fry <benjaminfry@me.com>
 //
 // Licensed under the Apache License, Version 2.0, <LICENSE-APACHE or
 // http://apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
@@ -21,7 +21,7 @@ use trust_dns::rr::{DNSClass, LowerName, Name, RData, Record, RecordSet, RecordT
 
 #[cfg(feature = "dnssec")]
 use authority::UpdateRequest;
-use authority::{AuthLookup, MessageRequest, UpdateResult, ZoneType};
+use authority::{AuthLookup, Authority, MessageRequest, UpdateResult, ZoneType};
 use store::sqlite::Journal;
 
 use error::{PersistenceErrorKind, PersistenceResult};
@@ -187,47 +187,9 @@ impl SqliteAuthority {
         &self.secure_keys
     }
 
-    /// Get the origin of this zone, i.e. example.com is the origin for www.example.com
-    pub fn origin(&self) -> &LowerName {
-        &self.origin
-    }
-
-    /// What type is this zone
-    pub fn zone_type(&self) -> ZoneType {
-        self.zone_type
-    }
-
     /// Get all the
     pub fn records(&self) -> &BTreeMap<RrKey, RecordSet> {
         &self.records
-    }
-
-    /// Returns the SOA of the authority.
-    ///
-    /// *Note*: This will only return the SOA, if this is fullfilling a request, a standard lookup
-    ///  should be used, see `soa_secure()`, which will optionally return RRSIGs.
-    pub fn soa(&self) -> LookupRecords {
-        // SOA should be origin|SOA
-        self.lookup(
-            &self.origin,
-            RecordType::SOA,
-            false,
-            SupportedAlgorithms::new(),
-        )
-    }
-
-    /// Returns the SOA record for the zone
-    pub fn soa_secure(
-        &self,
-        is_secure: bool,
-        supported_algorithms: SupportedAlgorithms,
-    ) -> LookupRecords {
-        self.lookup(
-            &self.origin,
-            RecordType::SOA,
-            is_secure,
-            supported_algorithms,
-        )
     }
 
     /// Returns the minimum ttl (as used in the SOA record)
@@ -283,16 +245,6 @@ impl SqliteAuthority {
             );
             0
         }
-    }
-
-    /// Get the NS, NameServer, record for the zone
-    pub fn ns(&self, is_secure: bool, supported_algorithms: SupportedAlgorithms) -> LookupRecords {
-        self.lookup(
-            &self.origin,
-            RecordType::NS,
-            is_secure,
-            supported_algorithms,
-        )
     }
 
     /// [RFC 2136](https://tools.ietf.org/html/rfc2136), DNS Update, April 1997
@@ -879,151 +831,6 @@ impl SqliteAuthority {
         records.insert(record, serial)
     }
 
-    /// Takes the UpdateMessage, extracts the Records, and applies the changes to the record set.
-    ///
-    /// [RFC 2136](https://tools.ietf.org/html/rfc2136), DNS Update, April 1997
-    ///
-    /// ```text
-    ///
-    /// 3.4 - Process Update Section
-    ///
-    ///   Next, the Update Section is processed as follows.
-    ///
-    /// 3.4.2 - Update
-    ///
-    ///   The Update Section is parsed into RRs and these RRs are processed in
-    ///   order.
-    ///
-    /// 3.4.2.1. If any system failure (such as an out of memory condition,
-    ///   or a hardware error in persistent storage) occurs during the
-    ///   processing of this section, signal SERVFAIL to the requestor and undo
-    ///   all updates applied to the zone during this transaction.
-    ///
-    /// 3.4.2.2. Any Update RR whose CLASS is the same as ZCLASS is added to
-    ///   the zone.  In case of duplicate RDATAs (which for SOA RRs is always
-    ///   the case, and for WKS RRs is the case if the ADDRESS and PROTOCOL
-    ///   fields both match), the Zone RR is replaced by Update RR.  If the
-    ///   TYPE is SOA and there is no Zone SOA RR, or the new SOA.SERIAL is
-    ///   lower (according to [RFC1982]) than or equal to the current Zone SOA
-    ///   RR's SOA.SERIAL, the Update RR is ignored.  In the case of a CNAME
-    ///   Update RR and a non-CNAME Zone RRset or vice versa, ignore the CNAME
-    ///   Update RR, otherwise replace the CNAME Zone RR with the CNAME Update
-    ///   RR.
-    ///
-    /// 3.4.2.3. For any Update RR whose CLASS is ANY and whose TYPE is ANY,
-    ///   all Zone RRs with the same NAME are deleted, unless the NAME is the
-    ///   same as ZNAME in which case only those RRs whose TYPE is other than
-    ///   SOA or NS are deleted.  For any Update RR whose CLASS is ANY and
-    ///   whose TYPE is not ANY all Zone RRs with the same NAME and TYPE are
-    ///   deleted, unless the NAME is the same as ZNAME in which case neither
-    ///   SOA or NS RRs will be deleted.
-    ///
-    /// 3.4.2.4. For any Update RR whose class is NONE, any Zone RR whose
-    ///   NAME, TYPE, RDATA and RDLENGTH are equal to the Update RR is deleted,
-    ///   unless the NAME is the same as ZNAME and either the TYPE is SOA or
-    ///   the TYPE is NS and the matching Zone RR is the only NS remaining in
-    ///   the RRset, in which case this Update RR is ignored.
-    ///
-    /// 3.4.2.5. Signal NOERROR to the requestor.
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `update` - The `UpdateMessage` records will be extracted and used to perform the update
-    ///              actions as specified in the above RFC.
-    ///
-    /// # Return value
-    ///
-    /// true if any of additions, updates or deletes were made to the zone, false otherwise. Err is
-    ///  returned in the case of bad data, etc.
-    #[cfg(feature = "dnssec")]
-    pub fn update(&mut self, update: &MessageRequest) -> UpdateResult<bool> {
-        // the spec says to authorize after prereqs, seems better to auth first.
-        self.authorize(update)?;
-        self.verify_prerequisites(update.prerequisites())?;
-        self.pre_scan(update.updates())?;
-
-        self.update_records(update.updates(), true)
-    }
-
-    /// Always fail when DNSSEC is disabled.
-    #[cfg(not(feature = "dnssec"))]
-    pub fn update(&mut self, _update: &MessageRequest) -> UpdateResult<bool> {
-        Err(ResponseCode::NotImp)
-    }
-
-    /// Using the specified query, perform a lookup against this zone.
-    ///
-    /// # Arguments
-    ///
-    /// * `query` - the query to perform the lookup with.
-    /// * `is_secure` - if true, then RRSIG records (if this is a secure zone) will be returned.
-    ///
-    /// # Return value
-    ///
-    /// Returns a vectory containing the results of the query, it will be empty if not found. If
-    ///  `is_secure` is true, in the case of no records found then NSEC records will be returned.
-    pub fn search<'s, 'q>(
-        &'s self,
-        query: &'q LowerQuery,
-        is_secure: bool,
-        supported_algorithms: SupportedAlgorithms,
-    ) -> AuthLookup<'s, 'q> {
-        let lookup_name = query.name();
-        let record_type: RecordType = query.query_type();
-
-        // if this is an AXFR zone transfer, verify that this is either the slave or master
-        //  for AXFR the first and last record must be the SOA
-        if RecordType::AXFR == record_type {
-            // TODO: support more advanced AXFR options
-            if !self.allow_axfr {
-                return AuthLookup::Refused;
-            }
-
-            match self.zone_type() {
-                ZoneType::Master | ZoneType::Slave => (),
-                // TODO: Forward?
-                _ => return AuthLookup::NxDomain, // TODO: this sould be an error.
-            }
-        }
-
-        // perform the actual lookup
-        match record_type {
-            RecordType::SOA => {
-                let lookup =
-                    self.lookup(&self.origin, record_type, is_secure, supported_algorithms);
-
-                match lookup {
-                    LookupRecords::NxDomain => AuthLookup::NxDomain,
-                    LookupRecords::NameExists => AuthLookup::NameExists,
-                    lookup => AuthLookup::SOA(lookup),
-                }
-            }
-            RecordType::AXFR => {
-                // FIXME: shouldn't these SOA's be secure? at least the first, perhaps not the last?
-                let start_soa = self.soa();
-                let end_soa = self.soa();
-                let records =
-                    self.lookup(lookup_name, record_type, is_secure, supported_algorithms);
-
-                match start_soa {
-                    LookupRecords::NxDomain => AuthLookup::NxDomain,
-                    LookupRecords::NameExists => AuthLookup::NameExists,
-                    start_soa => AuthLookup::AXFR(start_soa.chain(records).chain(end_soa)),
-                }
-            }
-            _ => {
-                let lookup = self.lookup(lookup_name, record_type, is_secure, supported_algorithms);
-
-                match lookup {
-                    LookupRecords::NxDomain => AuthLookup::NxDomain,
-                    LookupRecords::NameExists => AuthLookup::NameExists,
-                    lookup => AuthLookup::Records(lookup),
-                }
-            }
-        }
-    }
-
     /// Looks up all Resource Records matching the giving `Name` and `RecordType`.
     ///
     /// # Arguments
@@ -1080,43 +887,6 @@ impl SqliteAuthority {
         }
 
         result
-    }
-
-    /// Return the NSEC records based on the given name
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - given this name (i.e. the lookup name), return the NSEC record that is less than
-    ///            this
-    /// * `is_secure` - if true then it will return RRSIG records as well
-    pub fn get_nsec_records<'s, 'q>(
-        &'s self,
-        name: &'q LowerName,
-        is_secure: bool,
-        supported_algorithms: SupportedAlgorithms,
-    ) -> LookupRecords<'s, 'q> {
-        #[cfg(feature = "dnssec")]
-        fn is_nsec_rrset(rr_set: &RecordSet) -> bool {
-            use trust_dns::rr::rdata::DNSSECRecordType;
-
-            rr_set.record_type() == RecordType::DNSSEC(DNSSECRecordType::NSEC)
-        }
-
-        #[cfg(not(feature = "dnssec"))]
-        fn is_nsec_rrset(_record: &RecordSet) -> bool {
-            // There's no way to create an NSEC record when DNSSEC is disabled
-            // at build time.
-            false
-        }
-
-        self.records
-            .values()
-            .filter(|rr_set| is_nsec_rrset(rr_set))
-            .skip_while(|rr_set| *name < rr_set.name().into())
-            .next()
-            .map_or(LookupRecords::NxDomain, |rr_set| {
-                LookupRecords::from(rr_set.records(is_secure, supported_algorithms))
-            })
     }
 
     /// (Re)generates the nsec records, increments the serial number nad signs the zone
@@ -1312,6 +1082,238 @@ impl SqliteAuthority {
         }
 
         Ok(())
+    }
+}
+
+impl Authority for SqliteAuthority {
+    /// What type is this zone
+    fn zone_type(&self) -> ZoneType {
+        self.zone_type
+    }
+
+    /// Takes the UpdateMessage, extracts the Records, and applies the changes to the record set.
+    ///
+    /// [RFC 2136](https://tools.ietf.org/html/rfc2136), DNS Update, April 1997
+    ///
+    /// ```text
+    ///
+    /// 3.4 - Process Update Section
+    ///
+    ///   Next, the Update Section is processed as follows.
+    ///
+    /// 3.4.2 - Update
+    ///
+    ///   The Update Section is parsed into RRs and these RRs are processed in
+    ///   order.
+    ///
+    /// 3.4.2.1. If any system failure (such as an out of memory condition,
+    ///   or a hardware error in persistent storage) occurs during the
+    ///   processing of this section, signal SERVFAIL to the requestor and undo
+    ///   all updates applied to the zone during this transaction.
+    ///
+    /// 3.4.2.2. Any Update RR whose CLASS is the same as ZCLASS is added to
+    ///   the zone.  In case of duplicate RDATAs (which for SOA RRs is always
+    ///   the case, and for WKS RRs is the case if the ADDRESS and PROTOCOL
+    ///   fields both match), the Zone RR is replaced by Update RR.  If the
+    ///   TYPE is SOA and there is no Zone SOA RR, or the new SOA.SERIAL is
+    ///   lower (according to [RFC1982]) than or equal to the current Zone SOA
+    ///   RR's SOA.SERIAL, the Update RR is ignored.  In the case of a CNAME
+    ///   Update RR and a non-CNAME Zone RRset or vice versa, ignore the CNAME
+    ///   Update RR, otherwise replace the CNAME Zone RR with the CNAME Update
+    ///   RR.
+    ///
+    /// 3.4.2.3. For any Update RR whose CLASS is ANY and whose TYPE is ANY,
+    ///   all Zone RRs with the same NAME are deleted, unless the NAME is the
+    ///   same as ZNAME in which case only those RRs whose TYPE is other than
+    ///   SOA or NS are deleted.  For any Update RR whose CLASS is ANY and
+    ///   whose TYPE is not ANY all Zone RRs with the same NAME and TYPE are
+    ///   deleted, unless the NAME is the same as ZNAME in which case neither
+    ///   SOA or NS RRs will be deleted.
+    ///
+    /// 3.4.2.4. For any Update RR whose class is NONE, any Zone RR whose
+    ///   NAME, TYPE, RDATA and RDLENGTH are equal to the Update RR is deleted,
+    ///   unless the NAME is the same as ZNAME and either the TYPE is SOA or
+    ///   the TYPE is NS and the matching Zone RR is the only NS remaining in
+    ///   the RRset, in which case this Update RR is ignored.
+    ///
+    /// 3.4.2.5. Signal NOERROR to the requestor.
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `update` - The `UpdateMessage` records will be extracted and used to perform the update
+    ///              actions as specified in the above RFC.
+    ///
+    /// # Return value
+    ///
+    /// true if any of additions, updates or deletes were made to the zone, false otherwise. Err is
+    ///  returned in the case of bad data, etc.
+    #[cfg(feature = "dnssec")]
+    fn update(&mut self, update: &MessageRequest) -> UpdateResult<bool> {
+        // the spec says to authorize after prereqs, seems better to auth first.
+        self.authorize(update)?;
+        self.verify_prerequisites(update.prerequisites())?;
+        self.pre_scan(update.updates())?;
+
+        self.update_records(update.updates(), true)
+    }
+
+    /// Always fail when DNSSEC is disabled.
+    #[cfg(not(feature = "dnssec"))]
+    fn update(&mut self, _update: &MessageRequest) -> UpdateResult<bool> {
+        Err(ResponseCode::NotImp)
+    }
+
+    /// Get the origin of this zone, i.e. example.com is the origin for www.example.com
+    fn origin(&self) -> &LowerName {
+        &self.origin
+    }
+
+    /// Using the specified query, perform a lookup against this zone.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - the query to perform the lookup with.
+    /// * `is_secure` - if true, then RRSIG records (if this is a secure zone) will be returned.
+    ///
+    /// # Return value
+    ///
+    /// Returns a vectory containing the results of the query, it will be empty if not found. If
+    ///  `is_secure` is true, in the case of no records found then NSEC records will be returned.
+    fn search<'s, 'q>(
+        &'s self,
+        query: &'q LowerQuery,
+        is_secure: bool,
+        supported_algorithms: SupportedAlgorithms,
+    ) -> AuthLookup<'s, 'q> {
+        let lookup_name = query.name();
+        let record_type: RecordType = query.query_type();
+
+        // if this is an AXFR zone transfer, verify that this is either the slave or master
+        //  for AXFR the first and last record must be the SOA
+        if RecordType::AXFR == record_type {
+            // TODO: support more advanced AXFR options
+            if !self.allow_axfr {
+                return AuthLookup::Refused;
+            }
+
+            match self.zone_type() {
+                ZoneType::Master | ZoneType::Slave => (),
+                // TODO: Forward?
+                _ => return AuthLookup::NxDomain, // TODO: this sould be an error.
+            }
+        }
+
+        // perform the actual lookup
+        match record_type {
+            RecordType::SOA => {
+                let lookup =
+                    self.lookup(&self.origin, record_type, is_secure, supported_algorithms);
+
+                match lookup {
+                    LookupRecords::NxDomain => AuthLookup::NxDomain,
+                    LookupRecords::NameExists => AuthLookup::NameExists,
+                    lookup => AuthLookup::SOA(lookup),
+                }
+            }
+            RecordType::AXFR => {
+                // FIXME: shouldn't these SOA's be secure? at least the first, perhaps not the last?
+                let start_soa = self.soa();
+                let end_soa = self.soa();
+                let records =
+                    self.lookup(lookup_name, record_type, is_secure, supported_algorithms);
+
+                match start_soa {
+                    LookupRecords::NxDomain => AuthLookup::NxDomain,
+                    LookupRecords::NameExists => AuthLookup::NameExists,
+                    start_soa => AuthLookup::AXFR(start_soa.chain(records).chain(end_soa)),
+                }
+            }
+            _ => {
+                let lookup = self.lookup(lookup_name, record_type, is_secure, supported_algorithms);
+
+                match lookup {
+                    LookupRecords::NxDomain => AuthLookup::NxDomain,
+                    LookupRecords::NameExists => AuthLookup::NameExists,
+                    lookup => AuthLookup::Records(lookup),
+                }
+            }
+        }
+    }
+
+    /// Get the NS, NameServer, record for the zone
+    fn ns(&self, is_secure: bool, supported_algorithms: SupportedAlgorithms) -> LookupRecords {
+        self.lookup(
+            &self.origin,
+            RecordType::NS,
+            is_secure,
+            supported_algorithms,
+        )
+    }
+
+    /// Return the NSEC records based on the given name
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - given this name (i.e. the lookup name), return the NSEC record that is less than
+    ///            this
+    /// * `is_secure` - if true then it will return RRSIG records as well
+    fn get_nsec_records<'s, 'q>(
+        &'s self,
+        name: &'q LowerName,
+        is_secure: bool,
+        supported_algorithms: SupportedAlgorithms,
+    ) -> LookupRecords<'s, 'q> {
+        #[cfg(feature = "dnssec")]
+        fn is_nsec_rrset(rr_set: &RecordSet) -> bool {
+            use trust_dns::rr::rdata::DNSSECRecordType;
+
+            rr_set.record_type() == RecordType::DNSSEC(DNSSECRecordType::NSEC)
+        }
+
+        #[cfg(not(feature = "dnssec"))]
+        fn is_nsec_rrset(_record: &RecordSet) -> bool {
+            // There's no way to create an NSEC record when DNSSEC is disabled
+            // at build time.
+            false
+        }
+
+        self.records
+            .values()
+            .filter(|rr_set| is_nsec_rrset(rr_set))
+            .skip_while(|rr_set| *name < rr_set.name().into())
+            .next()
+            .map_or(LookupRecords::NxDomain, |rr_set| {
+                LookupRecords::from(rr_set.records(is_secure, supported_algorithms))
+            })
+    }
+
+    /// Returns the SOA of the authority.
+    ///
+    /// *Note*: This will only return the SOA, if this is fullfilling a request, a standard lookup
+    ///  should be used, see `soa_secure()`, which will optionally return RRSIGs.
+    fn soa(&self) -> LookupRecords {
+        // SOA should be origin|SOA
+        self.lookup(
+            &self.origin,
+            RecordType::SOA,
+            false,
+            SupportedAlgorithms::new(),
+        )
+    }
+
+    /// Returns the SOA record for the zone
+    fn soa_secure(
+        &self,
+        is_secure: bool,
+        supported_algorithms: SupportedAlgorithms,
+    ) -> LookupRecords {
+        self.lookup(
+            &self.origin,
+            RecordType::SOA,
+            is_secure,
+            supported_algorithms,
+        )
     }
 }
 
