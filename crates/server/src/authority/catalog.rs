@@ -27,7 +27,7 @@ use trust_dns::rr::rdata::opt::{EdnsCode, EdnsOption};
 use trust_dns::rr::{LowerName, RecordType};
 
 use authority::{AuthLookup, MessageRequest, MessageResponse, MessageResponseBuilder, ZoneType};
-use store::sqlite::{Authority, LookupRecords};
+use store::sqlite::{LookupRecords, SqliteAuthority as Authority};
 
 /// Set of authorities, zones, available to this server.
 #[derive(Default)]

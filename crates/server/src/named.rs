@@ -75,7 +75,7 @@ use trust_dns_server::config::TlsCertConfig;
 use trust_dns_server::config::{Config, ZoneConfig};
 use trust_dns_server::logger;
 use trust_dns_server::server::ServerFuture;
-use trust_dns_server::store::sqlite::{Authority, Journal};
+use trust_dns_server::store::sqlite::{Journal, SqliteAuthority};
 
 fn parse_zone_file(
     file: File,
@@ -84,7 +84,7 @@ fn parse_zone_file(
     allow_update: bool,
     allow_axfr: bool,
     is_dnssec_enabled: bool,
-) -> ParseResult<Authority> {
+) -> ParseResult<SqliteAuthority> {
     let mut file = file;
     let mut buf = String::new();
 
@@ -94,7 +94,7 @@ fn parse_zone_file(
     let lexer = Lexer::new(&buf);
     let (origin, records) = Parser::new().parse(lexer, origin)?;
 
-    Ok(Authority::new(
+    Ok(SqliteAuthority::new(
         origin,
         records,
         zone_type,
@@ -105,7 +105,7 @@ fn parse_zone_file(
 }
 
 #[cfg_attr(not(feature = "dnssec"), allow(unused_mut))]
-fn load_zone(zone_dir: &Path, zone_config: &ZoneConfig) -> Result<Authority, String> {
+fn load_zone(zone_dir: &Path, zone_config: &ZoneConfig) -> Result<SqliteAuthority, String> {
     debug!("loading zone with config: {:#?}", zone_config);
 
     let zone_name: Name = zone_config.get_zone().expect("bad zone name");
@@ -118,7 +118,7 @@ fn load_zone(zone_dir: &Path, zone_config: &ZoneConfig) -> Result<Authority, Str
         let journal = Journal::from_file(&journal_path)
             .map_err(|e| format!("error opening journal: {:?}: {}", journal_path, e))?;
 
-        let mut authority = Authority::new(
+        let mut authority = SqliteAuthority::new(
             zone_name.clone(),
             BTreeMap::new(),
             zone_config.get_zone_type(),
@@ -171,7 +171,7 @@ fn load_zone(zone_dir: &Path, zone_config: &ZoneConfig) -> Result<Authority, Str
 
     #[cfg(feature = "dnssec")]
     fn load_keys(
-        authority: &mut Authority,
+        authority: &mut SqliteAuthority,
         zone_name: Name,
         zone_config: &ZoneConfig,
     ) -> Result<(), String> {
@@ -199,7 +199,7 @@ fn load_zone(zone_dir: &Path, zone_config: &ZoneConfig) -> Result<Authority, Str
 
     #[cfg(not(feature = "dnssec"))]
     fn load_keys(
-        _authority: &mut Authority,
+        _authority: &mut SqliteAuthority,
         _zone_name: Name,
         _zone_config: &ZoneConfig,
     ) -> Result<(), String> {

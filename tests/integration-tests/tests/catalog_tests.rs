@@ -11,14 +11,14 @@ use trust_dns::rr::*;
 use trust_dns::serialize::binary::{BinDecodable, BinEncodable};
 
 use trust_dns_server::authority::*;
-use trust_dns_server::store::sqlite::Authority;
+use trust_dns_server::store::sqlite::SqliteAuthority;
 
 use trust_dns_integration::authority::create_example;
 use trust_dns_integration::*;
 
-pub fn create_test() -> Authority {
+pub fn create_test() -> SqliteAuthority {
     let origin: Name = Name::parse("test.com.", None).unwrap();
-    let mut records: Authority = Authority::new(
+    let mut records: SqliteAuthority = SqliteAuthority::new(
         origin.clone(),
         BTreeMap::new(),
         ZoneType::Master,

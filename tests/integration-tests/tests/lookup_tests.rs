@@ -21,7 +21,7 @@ use trust_dns_resolver::lookup_ip::LookupIpFuture;
 use trust_dns_resolver::lookup_state::CachingClient;
 use trust_dns_resolver::Hosts;
 use trust_dns_server::authority::Catalog;
-use trust_dns_server::store::sqlite::Authority;
+use trust_dns_server::store::sqlite::SqliteAuthority;
 
 use trust_dns_integration::authority::create_example;
 use trust_dns_integration::mock_client::*;
@@ -99,7 +99,7 @@ fn test_lookup_hosts() {
     assert_eq!(lookup.iter().next().unwrap(), Ipv4Addr::new(10, 0, 1, 104));
 }
 
-fn create_ip_like_example() -> Authority {
+fn create_ip_like_example() -> SqliteAuthority {
     let mut authority = create_example();
     authority.upsert(
         Record::new()

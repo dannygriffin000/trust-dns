@@ -26,11 +26,11 @@ use store::sqlite::Journal;
 
 use error::{PersistenceErrorKind, PersistenceResult};
 
-/// Authority is responsible for storing the resource records for a particular zone.
+/// SqliteAuthority is responsible for storing the resource records for a particular zone.
 ///
 /// Authorities default to DNSClass IN. The ZoneType specifies if this should be treated as the
 /// start of authority for the zone, is a slave, or a cached zone.
-pub struct Authority {
+pub struct SqliteAuthority {
     origin: LowerName,
     class: DNSClass,
     journal: Option<Journal>,
@@ -47,7 +47,7 @@ pub struct Authority {
     secure_keys: Vec<Signer>,
 }
 
-impl Authority {
+impl SqliteAuthority {
     /// Creates a new Authority.
     ///
     /// # Arguments
@@ -70,8 +70,8 @@ impl Authority {
         allow_update: bool,
         allow_axfr: bool,
         is_dnssec_enabled: bool,
-    ) -> Authority {
-        Authority {
+    ) -> Self {
+        Self {
             origin: LowerName::new(&origin),
             class: DNSClass::IN,
             journal: None,
