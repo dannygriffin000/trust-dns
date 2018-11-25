@@ -10,5 +10,5 @@
 pub mod authority;
 pub mod persistence;
 
-pub use self::authority::{LookupRecords, SqliteAuthority};
+pub use self::authority::{LookupRecords, LookupRecordsIter, SqliteAuthority};
 pub use self::persistence::Journal;

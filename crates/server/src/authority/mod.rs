@@ -40,7 +40,7 @@ mod catalog;
 pub(crate) mod message_request;
 mod message_response;
 
-pub use self::auth_lookup::AuthLookup;
+pub use self::auth_lookup::{AuthLookup, AuthLookupIter};
 pub use self::authority::Authority;
 pub use self::catalog::Catalog;
 pub use self::message_request::{MessageRequest, Queries, UpdateRequest};
