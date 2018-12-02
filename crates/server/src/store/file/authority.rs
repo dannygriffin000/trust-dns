@@ -10,17 +10,17 @@
 #[cfg(feature = "dnssec")]
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(feature = "dnssec")]
 use trust_dns::error::*;
 use trust_dns::op::{LowerQuery, ResponseCode};
-use trust_dns::rr::dnssec::{Signer, SupportedAlgorithms};
+use trust_dns::rr::dnssec::{DnsSecResult, Signer, SupportedAlgorithms};
 use trust_dns::rr::{DNSClass, LowerName, Name, RData, Record, RecordSet, RecordType, RrKey};
 
 use authority::{
-    AnyRecords, AuthLookup, Authority as AuthorityTrait, LookupRecords, MessageRequest,
-    UpdateResult, ZoneType,
+    AnyRecords, AuthLookup, Authority, LookupRecords, MessageRequest, UpdateResult, ZoneType,
 };
 use store::file::FileConfig;
 
@@ -28,7 +28,7 @@ use store::file::FileConfig;
 ///
 /// Authorities default to DNSClass IN. The ZoneType specifies if this should be treated as the
 /// start of authority for the zone, is a slave, or a cached zone.
-pub struct Authority {
+pub struct FileAuthority {
     origin: LowerName,
     class: DNSClass,
     records: BTreeMap<RrKey, Arc<RecordSet>>,
@@ -42,7 +42,7 @@ pub struct Authority {
     secure_keys: Vec<Signer>,
 }
 
-impl Authority {
+impl FileAuthority {
     /// Creates a new Authority.
     ///
     /// # Arguments
@@ -79,62 +79,44 @@ impl Authority {
 
     /// Read the Authority for the origin from the specified configuration
     pub fn try_from_config(
-        origin: Option<Name>,
+        origin: Name,
         zone_type: ZoneType,
         allow_axfr: bool,
-        config: FileConfig,
+        root_dir: Option<&Path>,
+        config: &FileConfig,
     ) -> Result<Self, String> {
         use std::fs::File;
         use std::io::Read;
         use trust_dns::serialize::txt::{Lexer, Parser};
 
-        let zone_path = config.path;
+        let zone_path = root_dir
+            .map(PathBuf::from)
+            .unwrap_or_else(PathBuf::new)
+            .join(&config.zone_file_path);
 
         info!("loading zone file: {:?}", zone_path);
 
-        let mut file =
-            File::open(&zone_path).map_err(|e| format!("error opening {}: {:?}", zone_path, e))?;
+        let mut file = File::open(&zone_path)
+            .map_err(|e| format!("error opening {}: {:?}", zone_path.display(), e))?;
 
         let mut buf = String::new();
 
         // TODO: this should really use something to read line by line or some other method to
         //  keep the usage down. and be a custom lexer...
         file.read_to_string(&mut buf)
-            .map_err(|e| format!("failed to read {}: {:?}", zone_path, e))?;
+            .map_err(|e| format!("failed to read {}: {:?}", zone_path.display(), e))?;
         let lexer = Lexer::new(&buf);
         let (origin, records) = Parser::new()
-            .parse(lexer, origin)
-            .map_err(|e| format!("failed to parse {}: {:?}", zone_path, e))?;
+            .parse(lexer, Some(origin))
+            .map_err(|e| format!("failed to parse {}: {:?}", zone_path.display(), e))?;
 
-        info!("zone file loaded: {}", origin);
-
-        Ok(Authority::new(origin, records, zone_type, allow_axfr))
-    }
-
-    /// By adding a secure key, this will implicitly enable dnssec for the zone.
-    ///
-    /// # Arguments
-    ///
-    /// * `signer` - Signer with associated private key
-    #[cfg(feature = "dnssec")]
-    pub fn add_secure_key(&mut self, signer: Signer) -> DnsSecResult<()> {
-        use trust_dns::rr::rdata::{DNSSECRData, DNSSECRecordType};
-
-        // also add the key to the zone
-        let zone_ttl = self.minimum_ttl();
-        let dnskey = signer.key().to_dnskey(signer.algorithm())?;
-        let dnskey = Record::from_rdata(
-            self.origin.clone().into(),
-            zone_ttl,
-            RecordType::DNSSEC(DNSSECRecordType::DNSKEY),
-            RData::DNSSEC(DNSSECRData::DNSKEY(dnskey)),
+        info!(
+            "zone file loaded: {} with {} records",
+            origin,
+            records.len()
         );
 
-        // TODO: also generate the CDS and CDNSKEY
-        let serial = self.serial();
-        self.upsert(dnskey, serial);
-        self.secure_keys.push(signer);
-        Ok(())
+        Ok(FileAuthority::new(origin, records, zone_type, allow_axfr))
     }
 
     /// Enables AXFRs of all the zones records
@@ -503,7 +485,7 @@ impl Authority {
     }
 }
 
-impl AuthorityTrait for Authority {
+impl Authority for FileAuthority {
     /// What type is this zone
     fn zone_type(&self) -> ZoneType {
         self.zone_type
@@ -592,6 +574,8 @@ impl AuthorityTrait for Authority {
         is_secure: bool,
         supported_algorithms: SupportedAlgorithms,
     ) -> AuthLookup {
+        debug!("searching FileAuthority for: {}", query);
+
         let lookup_name = query.name();
         let record_type: RecordType = query.query_type();
 
@@ -638,9 +622,15 @@ impl AuthorityTrait for Authority {
                     },
                 }
             }
-            _ => self
-                .lookup(lookup_name, record_type, is_secure, supported_algorithms)
-                .into(),
+            _ => {
+                let lookup = self.lookup(lookup_name, record_type, is_secure, supported_algorithms);
+
+                match lookup {
+                    LookupRecords::NxDomain => AuthLookup::NxDomain,
+                    LookupRecords::NameExists => AuthLookup::NameExists,
+                    lookup => AuthLookup::Records(lookup),
+                }
+            }
         }
     }
 
@@ -714,6 +704,59 @@ impl AuthorityTrait for Authority {
             supported_algorithms,
         ).into()
     }
+
+    /// By adding a secure key, this will implicitly enable dnssec for the zone.
+    ///
+    /// # Arguments
+    ///
+    /// * `signer` - Signer with associated private key
+    #[cfg(feature = "dnssec")]
+    fn add_secure_key(&mut self, signer: Signer) -> DnsSecResult<()> {
+        use trust_dns::rr::rdata::{DNSSECRData, DNSSECRecordType};
+
+        // also add the key to the zone
+        let zone_ttl = self.minimum_ttl();
+        let dnskey = signer.key().to_dnskey(signer.algorithm())?;
+        let dnskey = Record::from_rdata(
+            self.origin.clone().into(),
+            zone_ttl,
+            RecordType::DNSSEC(DNSSECRecordType::DNSKEY),
+            RData::DNSSEC(DNSSECRData::DNSKEY(dnskey)),
+        );
+
+        // TODO: also generate the CDS and CDNSKEY
+        let serial = self.serial();
+        self.upsert(dnskey, serial);
+        self.secure_keys.push(signer);
+        Ok(())
+    }
+
+    /// This will fail, the dnssec feature must be enabled
+    #[cfg(not(feature = "dnssec"))]
+    fn add_secure_key(&mut self, _signer: Signer) -> DnsSecResult<()> {
+        Err("DNSSEC is not enabled.".into())
+    }
+
+    /// (Re)generates the nsec records, increments the serial number nad signs the zone
+    #[cfg(feature = "dnssec")]
+    fn secure_zone(&mut self) -> DnsSecResult<()> {
+        // TODO: only call nsec_zone after adds/deletes
+        // needs to be called before incrementing the soa serial, to make sur IXFR works properly
+        self.nsec_zone();
+
+        // need to resign any records at the current serial number and bump the number.
+        // first bump the serial number on the SOA, so that it is resigned with the new serial.
+        self.increment_soa_serial();
+
+        // TODO: should we auto sign here? or maybe up a level...
+        self.sign_zone()
+    }
+
+    /// (Re)generates the nsec records, increments the serial number nad signs the zone
+    #[cfg(not(feature = "dnssec"))]
+    fn secure_zone(&mut self) -> DnsSecResult<()> {
+        Err("DNSSEC is not enabled.".into())
+    }
 }
 
 // TODO: construct a battery of standard authority tests
@@ -727,13 +770,14 @@ mod tests {
     #[test]
     fn test_load_zone() {
         let config = FileConfig {
-            path: "tests/named_test_configs/example.com.zone".to_string(),
+            zone_file_path: "tests/named_test_configs/example.com.zone".to_string(),
         };
-        let authority = Authority::try_from_config(
-            Some(Name::from_str("example.com.").unwrap()),
+        let authority = FileAuthority::try_from_config(
+            Name::from_str("example.com.").unwrap(),
             ZoneType::Master,
             false,
-            config,
+            None,
+            &config,
         ).expect("failed to load file");
 
         let lookup = authority.lookup(

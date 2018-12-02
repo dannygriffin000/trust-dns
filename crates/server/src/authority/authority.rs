@@ -8,7 +8,7 @@
 //! All authority related types
 
 use trust_dns::op::LowerQuery;
-use trust_dns::rr::dnssec::SupportedAlgorithms;
+use trust_dns::rr::dnssec::{DnsSecResult, Signer, SupportedAlgorithms};
 use trust_dns::rr::LowerName;
 
 use authority::{AuthLookup, MessageRequest, UpdateResult, ZoneType};
@@ -67,4 +67,10 @@ pub trait Authority: Send {
 
     /// Returns the SOA record for the zone
     fn soa_secure(&self, is_secure: bool, supported_algorithms: SupportedAlgorithms) -> AuthLookup;
+
+    /// Add Signer
+    fn add_secure_key(&mut self, signer: Signer) -> DnsSecResult<()>;
+
+    /// Sign the zone for DNSSEC
+    fn secure_zone(&mut self) -> DnsSecResult<()>;
 }

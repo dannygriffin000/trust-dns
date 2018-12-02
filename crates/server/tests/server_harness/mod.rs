@@ -175,7 +175,7 @@ pub fn query_message<C: ClientHandle>(
 ) -> DnsResponse {
     println!("sending request: {} for: {}", name, record_type);
     let response = io_loop.block_on(client.query(name.clone(), DNSClass::IN, record_type));
-    println!("got response: {:#?}", response);
+    //println!("got response: {}");
     response.expect("request failed")
 }
 

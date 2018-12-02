@@ -10,12 +10,13 @@
 #[cfg(feature = "dnssec")]
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(feature = "dnssec")]
 use trust_dns::error::*;
 use trust_dns::op::{LowerQuery, ResponseCode};
-use trust_dns::rr::dnssec::{Signer, SupportedAlgorithms};
+use trust_dns::rr::dnssec::{DnsSecResult, Signer, SupportedAlgorithms};
 use trust_dns::rr::{DNSClass, LowerName, Name, RData, Record, RecordSet, RecordType, RrKey};
 
 #[cfg(feature = "dnssec")]
@@ -87,19 +88,22 @@ impl SqliteAuthority {
 
     /// load the authority from the configuration
     pub fn try_from_config(
-        origin: Option<Name>,
+        origin: Name,
         zone_type: ZoneType,
         allow_axfr: bool,
-        config: SqliteConfig,
+        enable_dnssec: bool,
+        root_dir: Option<&Path>,
+        config: &SqliteConfig,
     ) -> Result<Self, String> {
-        use std::path::PathBuf;
-        use store::file::{self, FileConfig};
+        use store::file::{FileAuthority, FileConfig};
 
-        let zone_name: Name = origin.expect("bad zone name");
+        let zone_name: Name = origin;
+
+        let root_zone_dir = root_dir.map(PathBuf::from).unwrap_or_else(PathBuf::new);
 
         // to be compatible with previous versions, the extension might be zone, not jrnl
-        let journal_path: PathBuf = PathBuf::from(config.journal_file_path);
-        let zone_path: PathBuf = PathBuf::from(config.zone_file_path);
+        let journal_path: PathBuf = root_zone_dir.join(&config.journal_file_path);
+        let zone_path: PathBuf = root_zone_dir.join(&config.zone_file_path);
 
         // load the zone
         if journal_path.exists() {
@@ -113,7 +117,7 @@ impl SqliteAuthority {
                 zone_type,
                 config.allow_update,
                 allow_axfr,
-                config.enable_dnssec,
+                enable_dnssec,
             );
             authority
                 .recover_with_journal(&journal)
@@ -128,14 +132,15 @@ impl SqliteAuthority {
             info!("loading zone file: {:?}", zone_path);
 
             let file_config = FileConfig {
-                path: zone_path.to_str().unwrap().to_string(),
+                zone_file_path: config.zone_file_path.clone(),
             };
 
-            let records = file::Authority::try_from_config(
-                Some(zone_name.clone()),
+            let records = FileAuthority::try_from_config(
+                zone_name.clone(),
                 zone_type,
                 allow_axfr,
-                file_config,
+                root_dir,
+                &file_config,
             )?.unwrap_records();
 
             let mut authority = SqliteAuthority::new(
@@ -144,7 +149,7 @@ impl SqliteAuthority {
                 zone_type,
                 config.allow_update,
                 allow_axfr,
-                config.enable_dnssec,
+                enable_dnssec,
             );
 
             // if dynamic update is enabled, enable the journal
@@ -167,32 +172,6 @@ impl SqliteAuthority {
                 zone_path
             ))
         }
-    }
-
-    /// By adding a secure key, this will implicitly enable dnssec for the zone.
-    ///
-    /// # Arguments
-    ///
-    /// * `signer` - Signer with associated private key
-    #[cfg(feature = "dnssec")]
-    pub fn add_secure_key(&mut self, signer: Signer) -> DnsSecResult<()> {
-        use trust_dns::rr::rdata::{DNSSECRData, DNSSECRecordType};
-
-        // also add the key to the zone
-        let zone_ttl = self.minimum_ttl();
-        let dnskey = signer.key().to_dnskey(signer.algorithm())?;
-        let dnskey = Record::from_rdata(
-            self.origin.clone().into(),
-            zone_ttl,
-            RecordType::DNSSEC(DNSSECRecordType::DNSKEY),
-            RData::DNSSEC(DNSSECRData::DNSKEY(dnskey)),
-        );
-
-        // TODO: also generate the CDS and CDNSKEY
-        let serial = self.serial();
-        self.upsert(dnskey, serial);
-        self.secure_keys.push(signer);
-        Ok(())
     }
 
     /// Recovers the zone from a Journal, returns an error on failure to recover the zone.
@@ -989,27 +968,6 @@ impl SqliteAuthority {
         result
     }
 
-    /// (Re)generates the nsec records, increments the serial number nad signs the zone
-    #[cfg(feature = "dnssec")]
-    pub fn secure_zone(&mut self) -> DnsSecResult<()> {
-        // TODO: only call nsec_zone after adds/deletes
-        // needs to be called before incrementing the soa serial, to make sur IXFR works properly
-        self.nsec_zone();
-
-        // need to resign any records at the current serial number and bump the number.
-        // first bump the serial number on the SOA, so that it is resigned with the new serial.
-        self.increment_soa_serial();
-
-        // TODO: should we auto sign here? or maybe up a level...
-        self.sign_zone()
-    }
-
-    /// (Re)generates the nsec records, increments the serial number nad signs the zone
-    #[cfg(not(feature = "dnssec"))]
-    pub fn secure_zone(&mut self) -> Result<(), &str> {
-        Err("DNSSEC is not enabled.")
-    }
-
     /// Dummy implementation for when DNSSEC is disabled.
     #[cfg(feature = "dnssec")]
     fn nsec_zone(&mut self) {
@@ -1291,6 +1249,8 @@ impl Authority for SqliteAuthority {
         is_secure: bool,
         supported_algorithms: SupportedAlgorithms,
     ) -> AuthLookup {
+        debug!("searching SqliteAuthority for: {}", query);
+
         let lookup_name = query.name();
         let record_type: RecordType = query.query_type();
 
@@ -1418,5 +1378,57 @@ impl Authority for SqliteAuthority {
             is_secure,
             supported_algorithms,
         ).into()
+    }
+
+    /// By adding a secure key, this will implicitly enable dnssec for the zone.
+    ///
+    /// # Arguments
+    ///
+    /// * `signer` - Signer with associated private key
+    #[cfg(feature = "dnssec")]
+    fn add_secure_key(&mut self, signer: Signer) -> DnsSecResult<()> {
+        use trust_dns::rr::rdata::{DNSSECRData, DNSSECRecordType};
+
+        // also add the key to the zone
+        let zone_ttl = self.minimum_ttl();
+        let dnskey = signer.key().to_dnskey(signer.algorithm())?;
+        let dnskey = Record::from_rdata(
+            self.origin.clone().into(),
+            zone_ttl,
+            RecordType::DNSSEC(DNSSECRecordType::DNSKEY),
+            RData::DNSSEC(DNSSECRData::DNSKEY(dnskey)),
+        );
+
+        // TODO: also generate the CDS and CDNSKEY
+        let serial = self.serial();
+        self.upsert(dnskey, serial);
+        self.secure_keys.push(signer);
+        Ok(())
+    }
+
+    #[cfg(not(feature = "dnssec"))]
+    fn add_secure_key(&mut self, _signer: Signer) -> DnsSecResult<()> {
+        Err("DNSSEC is not enabled.".into())
+    }
+
+    /// (Re)generates the nsec records, increments the serial number nad signs the zone
+    #[cfg(feature = "dnssec")]
+    fn secure_zone(&mut self) -> DnsSecResult<()> {
+        // TODO: only call nsec_zone after adds/deletes
+        // needs to be called before incrementing the soa serial, to make sur IXFR works properly
+        self.nsec_zone();
+
+        // need to resign any records at the current serial number and bump the number.
+        // first bump the serial number on the SOA, so that it is resigned with the new serial.
+        self.increment_soa_serial();
+
+        // TODO: should we auto sign here? or maybe up a level...
+        self.sign_zone()
+    }
+
+    /// (Re)generates the nsec records, increments the serial number nad signs the zone
+    #[cfg(not(feature = "dnssec"))]
+    fn secure_zone(&mut self) -> DnsSecResult<()> {
+        Err("DNSSEC is not enabled.".into())
     }
 }

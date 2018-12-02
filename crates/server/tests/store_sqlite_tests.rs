@@ -22,14 +22,15 @@ fn sqlite(master_file_path: &str, test_name: &str) -> SqliteAuthority {
         zone_file_path: master_file_path.to_string(),
         journal_file_path: journal_path,
         allow_update: false,
-        enable_dnssec: false,
     };
 
     SqliteAuthority::try_from_config(
-        Some(Name::from_str("example.com.").unwrap()),
+        Name::from_str("example.com.").unwrap(),
         ZoneType::Master,
         false,
-        config,
+        false,
+        None,
+        &config,
     ).expect("failed to load file")
 }
 

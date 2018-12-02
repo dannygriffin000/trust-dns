@@ -26,7 +26,7 @@ use trust_dns::rr::Name;
 
 use authority::ZoneType;
 use error::{ConfigError, ConfigResult};
-use store;
+use store::StoreConfig;
 
 static DEFAULT_PATH: &'static str = "/var/named"; // TODO what about windows (do I care? ;)
 static DEFAULT_PORT: u16 = 53;
@@ -68,7 +68,7 @@ impl Config {
         let mut file: File = File::open(path)?;
         let mut toml: String = String::new();
         file.read_to_string(&mut toml)?;
-        toml.parse()
+        toml.parse().map_err(Into::into)
     }
 
     /// set of listening ipv4 addresses (for TCP and UDP)
@@ -155,15 +155,24 @@ impl FromStr for Config {
 /// Configuration for a zone
 #[derive(Deserialize, PartialEq, Debug)]
 pub struct ZoneConfig {
-    zone: String, // TODO: make Domain::Name decodable
-    zone_type: ZoneType,
-    file: Option<String>,
-    allow_update: Option<bool>,
-    allow_axfr: Option<bool>,
-    enable_dnssec: Option<bool>,
+    /// name of the zone
+    pub zone: String, // TODO: make Domain::Name decodable
+    /// type of the zone
+    pub zone_type: ZoneType,
+    /// location of the file (short for StoreConfig::FileConfig{zone_file_path})
+    pub file: Option<String>,
+    /// Deprecated allow_update, this is a Store option
+    pub allow_update: Option<bool>,
+    /// Allow AXFR (TODO: need auth)
+    pub allow_axfr: Option<bool>,
+    /// Enable DnsSec TODO: should this move to StoreConfig?
+    pub enable_dnssec: Option<bool>,
+    /// Keys for use by the zone
     #[serde(default)]
-    keys: Vec<KeyConfig>,
-    store: Option<store::Config>,
+    pub keys: Vec<KeyConfig>,
+    /// Store configurations, TODO: allow chained Stores
+    #[serde(default)]
+    pub stores: Option<StoreConfig>,
 }
 
 impl ZoneConfig {
@@ -195,7 +204,7 @@ impl ZoneConfig {
             allow_axfr,
             enable_dnssec,
             keys,
-            store: None,
+            stores: None,
         }
     }
 

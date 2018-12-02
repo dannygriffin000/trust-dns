@@ -40,12 +40,9 @@ extern crate trust_dns_openssl;
 extern crate trust_dns_rustls;
 extern crate trust_dns_server;
 
-use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{self, Read};
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 
 #[cfg(feature = "dnssec")]
 use chrono::Duration;
@@ -57,18 +54,16 @@ use tokio::runtime::current_thread::Runtime;
 use tokio_tcp::TcpListener;
 use tokio_udp::UdpSocket;
 
-use trust_dns::error::ParseResult;
 #[cfg(feature = "dnssec")]
 use trust_dns::rr::dnssec::{KeyPair, Private, Signer};
 use trust_dns::rr::Name;
-use trust_dns::serialize::txt::{Lexer, Parser};
 
 #[cfg(all(
     feature = "dns-over-openssl",
     not(feature = "dns-over-rustls")
 ))]
 use trust_dns_openssl::tls_server::*;
-use trust_dns_server::authority::{Catalog, ZoneType};
+use trust_dns_server::authority::{Authority, Catalog, ZoneType};
 #[cfg(feature = "dnssec")]
 use trust_dns_server::config::KeyConfig;
 #[cfg(feature = "dns-over-tls")]
@@ -76,106 +71,100 @@ use trust_dns_server::config::TlsCertConfig;
 use trust_dns_server::config::{Config, ZoneConfig};
 use trust_dns_server::logger;
 use trust_dns_server::server::ServerFuture;
-use trust_dns_server::store::sqlite::{Journal, SqliteAuthority};
-
-fn parse_zone_file(
-    file: File,
-    origin: Option<Name>,
-    zone_type: ZoneType,
-    allow_update: bool,
-    allow_axfr: bool,
-    is_dnssec_enabled: bool,
-) -> ParseResult<SqliteAuthority> {
-    let mut file = file;
-    let mut buf = String::new();
-
-    // TODO, this should really use something to read line by line or some other method to
-    //  keep the usage down. and be a custom lexer...
-    file.read_to_string(&mut buf)?;
-    let lexer = Lexer::new(&buf);
-    let (origin, records) = Parser::new().parse(lexer, origin)?;
-
-    Ok(SqliteAuthority::new(
-        origin,
-        records
-            .into_iter()
-            .map(|(key, rrset)| (key, Arc::new(rrset)))
-            .collect(),
-        zone_type,
-        allow_update,
-        allow_axfr,
-        is_dnssec_enabled,
-    ))
-}
+use trust_dns_server::store::file::{FileAuthority, FileConfig};
+use trust_dns_server::store::sqlite::{SqliteAuthority, SqliteConfig};
+use trust_dns_server::store::StoreConfig;
 
 #[cfg_attr(not(feature = "dnssec"), allow(unused_mut))]
-fn load_zone(zone_dir: &Path, zone_config: &ZoneConfig) -> Result<SqliteAuthority, String> {
+fn load_zone(zone_dir: &Path, zone_config: &ZoneConfig) -> Result<Box<dyn Authority>, String> {
+    use std::path::PathBuf;
+
     debug!("loading zone with config: {:#?}", zone_config);
 
     let zone_name: Name = zone_config.get_zone().expect("bad zone name");
-    let zone_path: PathBuf = zone_dir.to_owned().join(zone_config.get_file());
-    let journal_path: PathBuf = zone_path.with_extension("jrnl");
+    let zone_name_for_signer = zone_name.clone();
+    let zone_path: Option<String> = zone_config.file.clone();
+    let zone_type: ZoneType = zone_config.get_zone_type();
+    let is_axfr_allowed = zone_config.is_axfr_allowed();
+    let is_dnssec_enabled = zone_config.is_dnssec_enabled();
+
+    if zone_config.is_update_allowed() {
+        warn!("allow_update is deprecated in [[zones]] section, it belongs in [[zones.stores]]");
+    }
 
     // load the zone
-    let mut authority = if zone_config.is_update_allowed() && journal_path.exists() {
-        info!("recovering zone from journal: {:?}", journal_path);
-        let journal = Journal::from_file(&journal_path)
-            .map_err(|e| format!("error opening journal: {:?}: {}", journal_path, e))?;
+    let mut authority: Box<dyn Authority> = match zone_config.stores {
+        Some(StoreConfig::Sqlite(ref config)) => {
+            if zone_path.is_some() {
+                warn!("ignoring [[zones.file]] instead using [[zones.stores.zone_file_path]]");
+            }
 
-        let mut authority = SqliteAuthority::new(
-            zone_name.clone(),
-            BTreeMap::new(),
-            zone_config.get_zone_type(),
-            zone_config.is_update_allowed(),
-            zone_config.is_axfr_allowed(),
-            zone_config.is_dnssec_enabled(),
-        );
-        authority
-            .recover_with_journal(&journal)
-            .map_err(|e| format!("error recovering from journal: {}", e))?;
-
-        authority.set_journal(journal);
-        info!("recovered zone: {}", zone_name);
-
-        authority
-    } else if zone_path.exists() {
-        info!("loading zone file: {:?}", zone_path);
-
-        let zone_file = File::open(&zone_path)
-            .map_err(|e| format!("error opening zone file: {:?}: {}", zone_path, e))?;
-
-        let mut authority = parse_zone_file(
-            zone_file,
-            Some(zone_name.clone()),
-            zone_config.get_zone_type(),
-            zone_config.is_update_allowed(),
-            zone_config.is_axfr_allowed(),
-            zone_config.is_dnssec_enabled(),
-        ).map_err(|e| format!("error reading zone: {:?}: {}", zone_path, e))?;
-
-        // if dynamic update is enabled, enable the journal
-        if zone_config.is_update_allowed() {
-            info!("enabling journal: {:?}", journal_path);
-            let journal = Journal::from_file(&journal_path)
-                .map_err(|e| format!("error creating journal {:?}: {}", journal_path, e))?;
-
-            authority.set_journal(journal);
-
-            // preserve to the new journal, i.e. we just loaded the zone from disk, start the journal
-            authority
-                .persist_to_journal()
-                .map_err(|e| format!("error persisting to journal {:?}: {}", journal_path, e))?;
+            SqliteAuthority::try_from_config(
+                zone_name,
+                zone_type,
+                is_axfr_allowed,
+                is_dnssec_enabled,
+                Some(zone_dir),
+                config,
+            ).map(Box::new)?
         }
+        Some(StoreConfig::File(ref config)) => {
+            if zone_path.is_some() {
+                warn!("ignoring [[zones.file]] instead using [[zones.stores.zone_file_path]]");
+            }
+            FileAuthority::try_from_config(
+                zone_name,
+                zone_type,
+                is_axfr_allowed,
+                Some(zone_dir),
+                config,
+            ).map(Box::new)?
+        }
+        None if zone_config.is_update_allowed() => {
+            warn!(
+                "using deprecated SQLite load configuration, please move to [[zones.stores]] form"
+            );
+            let zone_file_path =
+                zone_path.ok_or_else(|| "file is a necessary parameter of zone_config")?;
+            let journal_file_path = PathBuf::from(zone_file_path.clone())
+                .with_extension("jrnl")
+                .to_str()
+                .map(String::from)
+                .ok_or_else(|| "non-unicode characters in file name")?;
 
-        info!("zone file loaded: {}", zone_name);
-        authority
-    } else {
-        return Err(format!("no zone file defined at: {:?}", zone_path));
+            let config = SqliteConfig {
+                zone_file_path,
+                journal_file_path,
+                allow_update: zone_config.is_update_allowed(),
+            };
+
+            SqliteAuthority::try_from_config(
+                zone_name,
+                zone_type,
+                is_axfr_allowed,
+                is_dnssec_enabled,
+                Some(zone_dir),
+                &config,
+            ).map(Box::new)?
+        }
+        None => {
+            let config = FileConfig {
+                zone_file_path: zone_path
+                    .ok_or_else(|| "file is a necessary parameter of zone_config")?,
+            };
+            FileAuthority::try_from_config(
+                zone_name,
+                zone_type,
+                is_axfr_allowed,
+                Some(zone_dir),
+                &config,
+            ).map(Box::new)?
+        }
     };
 
     #[cfg(feature = "dnssec")]
     fn load_keys(
-        authority: &mut SqliteAuthority,
+        authority: &mut dyn Authority,
         zone_name: Name,
         zone_config: &ZoneConfig,
     ) -> Result<(), String> {
@@ -203,7 +192,7 @@ fn load_zone(zone_dir: &Path, zone_config: &ZoneConfig) -> Result<SqliteAuthorit
 
     #[cfg(not(feature = "dnssec"))]
     fn load_keys(
-        _authority: &mut SqliteAuthority,
+        _authority: &mut dyn Authority,
         _zone_name: Name,
         _zone_config: &ZoneConfig,
     ) -> Result<(), String> {
@@ -211,7 +200,7 @@ fn load_zone(zone_dir: &Path, zone_config: &ZoneConfig) -> Result<SqliteAuthorit
     }
 
     // load any keys for the Zone, if it is a dynamic update zone, then keys are required
-    load_keys(&mut authority, zone_name, zone_config)?;
+    load_keys(authority.as_mut(), zone_name_for_signer, zone_config)?;
 
     info!(
         "zone successfully loaded: {}",
@@ -236,6 +225,9 @@ fn load_zone(zone_dir: &Path, zone_config: &ZoneConfig) -> Result<SqliteAuthorit
 ///  keys = [ "my_rsa_2048|RSASHA256", "/path/to/my_ed25519|ED25519" ]
 #[cfg(feature = "dnssec")]
 fn load_key(zone_name: Name, key_config: &KeyConfig) -> Result<Signer, String> {
+    use std::fs::File;
+    use std::io::Read;
+
     let key_path = key_config.key_path();
     let algorithm = key_config
         .algorithm()
@@ -492,7 +484,7 @@ pub fn main() {
     let config_path = Path::new(&flag_config);
     info!("loading configuration from: {:?}", config_path);
     let config = Config::read_config(config_path)
-        .unwrap_or_else(|_| panic!("could not read config: {:?}", config_path));
+        .unwrap_or_else(|e| panic!("could not read config {}: {:?}", config_path.display(), e));
     let directory_config = config.get_directory().to_path_buf();
     let flag_zonedir = args.flag_zonedir.clone();
     let zone_dir: &Path = flag_zonedir
@@ -508,8 +500,8 @@ pub fn main() {
             .unwrap_or_else(|_| panic!("bad zone name in {:?}", config_path));
 
         match load_zone(zone_dir, zone) {
-            Ok(authority) => catalog.upsert(zone_name.into(), Box::new(authority)),
-            Err(error) => error!("could not load zone {}: {}", zone_name, error),
+            Ok(authority) => catalog.upsert(zone_name.into(), authority),
+            Err(error) => panic!("could not load zone {}: {}", zone_name, error),
         }
     }
 

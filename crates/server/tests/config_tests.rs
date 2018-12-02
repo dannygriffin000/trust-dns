@@ -253,3 +253,34 @@ tls_listen_port = 8853
         Path::new("path/to/some.pkcs12")
     );
 }
+
+fn test_config(path: &str) {
+    let path = PathBuf::from("tests/named_test_configs")
+        .join(path)
+        .with_extension("toml");
+    assert!(path.exists(), "does not exist: {}", path.display());
+    println!("reading: {}", path.display());
+    Config::read_config(&path).expect("failed to read");
+}
+
+macro_rules! define_test_config {
+    ($name:ident) => {
+        #[test]
+        fn $name() {
+            test_config(stringify!($name));
+        }
+    };
+}
+
+define_test_config!(all_supported_dnssec);
+define_test_config!(dns_over_https);
+define_test_config!(dns_over_tls_rustls_and_openssl);
+define_test_config!(dns_over_tls);
+define_test_config!(dnssec_with_update);
+define_test_config!(dnssec_with_update_deprecated);
+define_test_config!(example);
+define_test_config!(ipv4_and_ipv6);
+define_test_config!(ipv4_only);
+define_test_config!(ipv6_only);
+define_test_config!(openssl_dnssec);
+define_test_config!(ring_dnssec);
