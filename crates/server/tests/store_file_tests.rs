@@ -10,7 +10,7 @@ use trust_dns_server::store::file::{FileAuthority, FileConfig};
 #[macro_use]
 mod authority_battery;
 
-fn file(master_file_path: &str, _test_name: &str) -> FileAuthority {
+fn file(master_file_path: &str, _module: &str, _test_name: &str) -> FileAuthority {
     let config = FileConfig {
         zone_file_path: master_file_path.to_string(),
     };
@@ -25,3 +25,5 @@ fn file(master_file_path: &str, _test_name: &str) -> FileAuthority {
 }
 
 basic_battery!(file);
+#[cfg(feature = "dnssec")]
+dnssec_battery!(file);

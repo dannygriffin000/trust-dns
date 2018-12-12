@@ -44,31 +44,22 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::path::Path;
 
-#[cfg(feature = "dnssec")]
-use chrono::Duration;
 use clap::{Arg, ArgMatches};
 use futures::{future, Future};
-#[cfg(feature = "dns-over-rustls")]
-use rustls::{Certificate, PrivateKey};
 use tokio::runtime::current_thread::Runtime;
 use tokio_tcp::TcpListener;
 use tokio_udp::UdpSocket;
 
-#[cfg(feature = "dnssec")]
-use trust_dns::rr::dnssec::{KeyPair, Private, Signer};
 use trust_dns::rr::Name;
-
 #[cfg(all(
     feature = "dns-over-openssl",
     not(feature = "dns-over-rustls")
 ))]
 use trust_dns_openssl::tls_server::*;
 use trust_dns_server::authority::{Authority, Catalog, ZoneType};
-#[cfg(feature = "dnssec")]
-use trust_dns_server::config::KeyConfig;
-#[cfg(feature = "dns-over-tls")]
-use trust_dns_server::config::TlsCertConfig;
 use trust_dns_server::config::{Config, ZoneConfig};
+#[cfg(any(feature = "dns-over-tls", feature = "dnssec"))]
+use trust_dns_server::config::dnssec::{self, TlsCertConfig};
 use trust_dns_server::logger;
 use trust_dns_server::server::ServerFuture;
 use trust_dns_server::store::file::{FileAuthority, FileConfig};
@@ -170,7 +161,7 @@ fn load_zone(zone_dir: &Path, zone_config: &ZoneConfig) -> Result<Box<dyn Author
     ) -> Result<(), String> {
         if zone_config.is_dnssec_enabled() {
             for key_config in zone_config.get_keys() {
-                let signer = load_key(zone_name.clone(), key_config).map_err(|e| {
+                let signer = key_config.try_into_signer(zone_name.clone()).map_err(|e| {
                     format!("failed to load key: {:?} msg: {}", key_config.key_path(), e)
                 })?;
                 info!(
@@ -207,171 +198,6 @@ fn load_zone(zone_dir: &Path, zone_config: &ZoneConfig) -> Result<Box<dyn Author
         zone_config.get_zone().unwrap()
     );
     Ok(authority)
-}
-
-/// set of DNSSEC algorithms to use to sign the zone. enable_dnssec must be true.
-/// these will be lookedup by $file.{key_name}.pem, for backward compatability
-/// with previous versions of TRust-DNS, if enable_dnssec is enabled but
-/// supported_algorithms is not specified, it will default to "RSASHA256" and
-/// look for the $file.pem for the key. To control key length, or other options
-/// keys of the specified formats can be generated in PEM format. Instructions
-/// for custom keys can be found elsewhere.
-///
-/// the currently supported set of supported_algorithms are
-/// ["RSASHA256", "RSASHA512", "ECDSAP256SHA256", "ECDSAP384SHA384", "ED25519"]
-///
-/// keys are listed in pairs of key_name and algorithm, the search path is the
-/// same directory has the zone $file:
-///  keys = [ "my_rsa_2048|RSASHA256", "/path/to/my_ed25519|ED25519" ]
-#[cfg(feature = "dnssec")]
-fn load_key(zone_name: Name, key_config: &KeyConfig) -> Result<Signer, String> {
-    use std::fs::File;
-    use std::io::Read;
-
-    let key_path = key_config.key_path();
-    let algorithm = key_config
-        .algorithm()
-        .map_err(|e| format!("bad algorithm: {}", e))?;
-    let format = key_config
-        .format()
-        .map_err(|e| format!("bad key format: {}", e))?;
-
-    // read the key in
-    let key: KeyPair<Private> = {
-        info!("reading key: {:?}", key_path);
-
-        let mut file = File::open(&key_path)
-            .map_err(|e| format!("error opening private key file: {:?}: {}", key_path, e))?;
-
-        let mut key_bytes = Vec::with_capacity(256);
-        file.read_to_end(&mut key_bytes)
-            .map_err(|e| format!("could not read key from: {:?}: {}", key_path, e))?;
-
-        format
-            .decode_key(&key_bytes, key_config.password(), algorithm)
-            .map_err(|e| format!("could not decode key: {}", e))?
-    };
-
-    let name = key_config
-        .signer_name()
-        .map_err(|e| format!("error reading name: {}", e))?
-        .unwrap_or(zone_name);
-
-    // add the key to the zone
-    // TODO: allow the duration of signatutes to be customized
-    let dnskey = key
-        .to_dnskey(algorithm)
-        .map_err(|e| format!("error converting to dnskey: {}", e))?;
-    Ok(Signer::dnssec(
-        dnskey.clone(),
-        key,
-        name,
-        Duration::weeks(52),
-    ))
-}
-
-#[cfg(all(
-    feature = "dns-over-openssl",
-    not(feature = "dns-over-rustls")
-))]
-fn load_cert(
-    zone_dir: &Path,
-    tls_cert_config: &TlsCertConfig,
-) -> Result<((X509, Option<Stack<X509>>), PKey<Private>), String> {
-    use trust_dns_openssl::tls_server::{read_cert_pem, read_cert_pkcs12, read_key_from_der};
-    use trust_dns_server::config::{CertType, PrivateKeyType};
-
-    let path = zone_dir.to_owned().join(tls_cert_config.get_path());
-    let cert_type = tls_cert_config.get_cert_type();
-    let password = tls_cert_config.get_password();
-    let private_key_path = tls_cert_config
-        .get_private_key()
-        .map(|p| zone_dir.to_owned().join(p));
-    let private_key_type = tls_cert_config.get_private_key_type();
-
-    // if it's pkcs12, we'll be collecting the key and certs from that, otherwise continue processing
-    let (cert, cert_chain) = match cert_type {
-        CertType::Pem => {
-            info!("loading TLS PEM certificate from: {:?}", path);
-            read_cert_pem(&path)?
-        }
-        CertType::Pkcs12 => {
-            if private_key_path.is_some() {
-                warn!(
-                    "ignoring specified key, using the one in the PKCS12 file: {}",
-                    path.display()
-                );
-            }
-            info!("loading TLS PKCS12 certificate from: {:?}", path);
-            return read_cert_pkcs12(&path, password).map_err(Into::into);
-        }
-    };
-
-    // it wasn't plcs12, we need to load the key separately
-    let key = match (private_key_path, private_key_type) {
-        (Some(private_key_path), PrivateKeyType::Pkcs8) => {
-            info!("loading TLS PKCS8 key from: {}", private_key_path.display());
-            read_key_from_pkcs8(&private_key_path, password)?
-        }
-        (Some(private_key_path), PrivateKeyType::Der) => {
-            info!("loading TLS DER key from: {}", private_key_path.display());
-            read_key_from_der(&private_key_path)?
-        }
-        (None, _) => {
-            return Err(format!(
-                "No private key associated with specified certificate"
-            ))
-        }
-    };
-
-    Ok(((cert, cert_chain), key))
-}
-
-#[cfg(feature = "dns-over-rustls")]
-fn load_cert(
-    zone_dir: &Path,
-    tls_cert_config: &TlsCertConfig,
-) -> Result<(Vec<Certificate>, PrivateKey), String> {
-    use trust_dns_rustls::tls_server::{read_cert, read_key_from_der, read_key_from_pkcs8};
-    use trust_dns_server::config::{CertType, PrivateKeyType};
-
-    let path = zone_dir.to_owned().join(tls_cert_config.get_path());
-    let cert_type = tls_cert_config.get_cert_type();
-    let password = tls_cert_config.get_password();
-    let private_key_path = tls_cert_config
-        .get_private_key()
-        .map(|p| zone_dir.to_owned().join(p));
-    let private_key_type = tls_cert_config.get_private_key_type();
-
-    let cert = match cert_type {
-        CertType::Pem => {
-            info!("loading TLS PEM certificate chain from: {}", path.display());
-            read_cert(&path).map_err(|e| format!("error reading cert: {}", e))?
-        }
-        CertType::Pkcs12 => {
-            return Err(
-                "PKCS12 is not supported with Rustls for certificate, use PEM encoding".to_string(),
-            )
-        }
-    };
-
-    let key = match (private_key_path, private_key_type) {
-        (Some(private_key_path), PrivateKeyType::Pkcs8) => {
-            info!("loading TLS PKCS8 key from: {}", private_key_path.display());
-            if password.is_some() {
-                warn!("Password for key supplied, but Rustls does not support encrypted PKCS8");
-            }
-
-            read_key_from_pkcs8(&private_key_path)?
-        }
-        (Some(private_key_path), PrivateKeyType::Der) => {
-            info!("loading TLS DER key from: {}", private_key_path.display());
-            read_key_from_der(&private_key_path)?
-        }
-        (None, _) => return Err("No private key associated with specified certificate".to_string()),
-    };
-
-    Ok((cert, key))
 }
 
 // argument name constants for the CLI options
@@ -639,7 +465,7 @@ fn config_tls(
         );
 
         let tls_cert =
-            load_cert(zone_dir, tls_cert_config).expect("error loading tls certificate file");
+            dnssec::load_cert(zone_dir, tls_cert_config).expect("error loading tls certificate file");
 
         info!("listening for TLS on {:?}", tls_listener);
         server
@@ -679,7 +505,7 @@ fn config_https(
         );
         // TODO: see about modifying native_tls to impl Clone for Pkcs12
         let tls_cert =
-            load_cert(zone_dir, tls_cert_config).expect("error loading tls certificate file");
+            dnssec::load_cert(zone_dir, tls_cert_config).expect("error loading tls certificate file");
 
         info!("listening for HTTPS on {:?}", https_listener);
         server

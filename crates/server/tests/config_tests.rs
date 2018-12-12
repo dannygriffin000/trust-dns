@@ -234,6 +234,7 @@ signer_name = \"ns.example.com.\"
 }
 
 #[test]
+#[cfg(feature = "dnssec")]
 fn test_parse_tls() {
     // defaults
     let config: Config = "".parse().unwrap();
