@@ -7,17 +7,7 @@
 
 //! Configuration module for the server binary, `named`.
 
-#[cfg(feature = "dnssec")]
 pub mod dnssec;
-
-/// dnssec is disabled, these types are placeholders
-#[cfg(not(feature = "dnssec"))]
-pub mod dnssec {
-    /// placeholder, dnssec must be enabled
-    pub type KeyConfig = Option<()>;
-    /// placeholder, dnssec must be enabled
-    pub type TlsCertConfig = Option<()>;
-}
 
 use std::fs::File;
 use std::io::Read;

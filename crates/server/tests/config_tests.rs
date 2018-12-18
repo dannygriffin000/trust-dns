@@ -155,7 +155,7 @@ fn test_parse_toml() {
     assert_eq!(config.get_directory(), Path::new("/dev/null"));
 }
 
-#[cfg(feature = "dnsssec")]
+#[cfg(feature = "dnssec")]
 #[test]
 fn test_parse_zone_keys() {
     use trust_dns::rr::dnssec::Algorithm;

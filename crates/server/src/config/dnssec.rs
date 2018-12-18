@@ -12,14 +12,15 @@ use std::path::Path;
 #[cfg(feature = "rustls")]
 use rustls::{Certificate, PrivateKey};
 
-use trust_dns::rr::domain::{Name, IntoName};
-#[cfg(any(feature = "openssl", feature = "ring", feature = "dnssec"))]
-use trust_dns::rr::dnssec::KeyFormat;
-use trust_dns::rr::dnssec::{Algorithm, Signer, KeyPair, Private};
-use trust_dns::error::{ParseErrorKind, ParseResult};
+use trust_dns::rr::domain::Name;
+#[cfg(feature = "dnssec")]
+use trust_dns::rr::domain::IntoName;
+#[cfg(any(feature = "dns-over-tls", feature = "dnssec"))]
+use trust_dns::rr::dnssec::{KeyFormat, Signer, KeyPair, Private};
+use trust_dns::rr::dnssec::Algorithm;
+use trust_dns::error::ParseResult;
 
 /// Key pair configuration for DNSSec keys for signing a zone
-#[cfg(feature = "dnssec")]
 #[derive(Deserialize, PartialEq, Debug)]
 pub struct KeyConfig {
     /// file path to the key
@@ -36,7 +37,6 @@ pub struct KeyConfig {
     pub is_zone_update_auth: Option<bool>,
 }
 
-#[cfg(feature = "dnssec")]
 impl KeyConfig {
     /// Return a new KeyConfig
     ///
@@ -72,7 +72,10 @@ impl KeyConfig {
     }
 
     /// Converts key into
+    #[cfg(any(feature = "dns-over-tls", feature = "dnssec"))]
     pub fn format(&self) -> ParseResult<KeyFormat> {
+        use trust_dns::error::ParseErrorKind;
+
         let extension = self.key_path().extension().ok_or_else(|| {
             ParseErrorKind::Msg(format!(
                 "file lacks extension, e.g. '.pk8': {:?}",
@@ -138,6 +141,7 @@ impl KeyConfig {
     }
 
     /// Tries to read the defined key into a Signer
+    #[cfg(feature = "dnssec")]
     pub fn try_into_signer<N: IntoName>(&self, signer_name: N) -> Result<Signer, String> {
         let signer_name = signer_name.into_name().map_err(|e| format!("error loading signer name: {}", e))?;
 
@@ -149,11 +153,6 @@ impl KeyConfig {
         Ok(key)
     }
 }
-
-#[cfg(not(feature = "dnssec"))]
-#[allow(missing_docs)]
-#[derive(Deserialize, PartialEq, Debug)]
-pub struct KeyConfig {}
 
 /// Certificate format of the file being read
 #[derive(Deserialize, PartialEq, Debug, Clone, Copy)]
