@@ -9,8 +9,10 @@
 
 use std::path::Path;
 
-#[cfg(feature = "rustls")]
+#[cfg(feature = "dns-over-rustls")]
 use rustls::{Certificate, PrivateKey};
+#[cfg(feature = "dns-over-openssl")]
+use openssl::{pkey::PKey, stack::Stack, x509::X509};
 
 use trust_dns::rr::domain::Name;
 #[cfg(feature = "dnssec")]
@@ -294,8 +296,8 @@ pub fn load_cert(
     zone_dir: &Path,
     tls_cert_config: &TlsCertConfig,
 ) -> Result<((X509, Option<Stack<X509>>), PKey<Private>), String> {
-    use trust_dns_openssl::tls_server::{read_cert_pem, read_cert_pkcs12, read_key_from_der};
-    use trust_dns_server::config::{CertType, PrivateKeyType};
+    use trust_dns_openssl::tls_server::{read_cert_pem, read_cert_pkcs12, read_key_from_der, read_key_from_pkcs8};
+    use config::dnssec::{CertType, PrivateKeyType};
 
     let path = zone_dir.to_owned().join(tls_cert_config.get_path());
     let cert_type = tls_cert_config.get_cert_type();

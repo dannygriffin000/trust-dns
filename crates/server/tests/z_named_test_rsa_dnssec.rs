@@ -2,6 +2,7 @@
 #![cfg(not(windows))]
 
 extern crate futures;
+#[macro_use]
 extern crate log;
 extern crate tokio;
 extern crate tokio_tcp;

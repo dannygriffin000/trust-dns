@@ -51,11 +51,6 @@ use tokio_tcp::TcpListener;
 use tokio_udp::UdpSocket;
 
 use trust_dns::rr::Name;
-#[cfg(all(
-    feature = "dns-over-openssl",
-    not(feature = "dns-over-rustls")
-))]
-use trust_dns_openssl::tls_server::*;
 use trust_dns_server::authority::{Authority, Catalog, ZoneType};
 use trust_dns_server::config::{Config, ZoneConfig};
 #[cfg(any(feature = "dns-over-tls", feature = "dnssec"))]
