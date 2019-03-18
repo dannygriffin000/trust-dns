@@ -97,7 +97,7 @@ tokio-rustls = { version = "0.8", optional = true }
 tokio-tcp = "0.1"
 tokio-timer = "0.2.6"
 tokio-udp = "0.1"
-toml = "0.4"
+toml = "0.5"
 trust-dns = { version = "0.15.0", path = "../client" }
 trust-dns-https = { version = "0.1.0", path = "../https", optional = true }
 trust-dns-proto = { version = "0.6.0", path = "../proto" }
