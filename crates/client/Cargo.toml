@@ -81,7 +81,7 @@ tokio = "^0.1.6"
 tokio-tcp = "^0.1"
 trust-dns-https = {version = "0.1.0", path = "../https", optional = true }
 trust-dns-proto = {version = "0.6.0", path = "../proto", features = ["dnssec"]}
-untrusted = { version = "^0.6", optional = true }
+untrusted = { version = "^0.9", optional = true }
 webpki = { version = "0.18", optional = true }
 
 [dev-dependencies]
